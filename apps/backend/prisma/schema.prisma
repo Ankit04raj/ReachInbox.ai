@@ -1,0 +1,82 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String      @id @default(cuid())
+  googleId      String?     @unique
+  name          String
+  email         String      @unique
+  avatar        String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  emails        Email[]
+  senders       Sender[]
+  slackTokens   SlackToken?
+}
+
+model Email {
+  id            String      @id @default(cuid())
+  userId        String
+  senderId      String
+  recipient     String
+  subject       String
+  body          String
+  scheduledAt   DateTime
+  sentAt        DateTime?
+  status        EmailStatus @default(SCHEDULED)
+  etherealUrl   String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  user          User        @relation(fields: [userId], references: [id])
+  sender        Sender      @relation(fields: [senderId], references: [id])
+
+  @@index([userId, status])
+  @@index([recipient])
+  @@index([scheduledAt])
+}
+
+model Sender {
+  id               String   @id @default(cuid())
+  userId           String
+  email            String   @unique
+  hourlyLimit      Int      @default(100)
+  minimumDelay     Int      @default(2000)
+  etherealUser     String?
+  etherealPass     String?
+  etherealHost     String?
+  etherealPort     Int?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id])
+  emails  Email[]
+
+  @@index([userId])
+}
+
+model SlackToken {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  accessToken String   @db.Text
+  teamId      String
+  connected   Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+enum EmailStatus {
+  SCHEDULED
+  PROCESSING
+  SENT
+  FAILED
+  DEFERRED
+}
