@@ -5,9 +5,9 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "prisma generate && tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
-    "test": "jest",
+    "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "prisma": "prisma",
     "lint": "eslint src/**/*.ts --fix"
@@ -28,11 +28,10 @@
     "passport": "^0.6.0",
     "passport-google-oauth20": "^2.0.0",
     "passport-slack": "^0.0.7",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "@prisma/client": "^5.22.0"
   },
   "devDependencies": {
-    "@prisma/client": "^5.22.0",
-    "@prisma/prisma7": "^7.10.1",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",

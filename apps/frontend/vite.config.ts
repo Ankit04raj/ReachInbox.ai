@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
+      '/admin/queues': 'http://localhost:4000',
       '/api': {
         target: 'http://localhost:4000',
         changeOrigin: true,

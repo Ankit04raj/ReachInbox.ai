@@ -1,148 +1,41 @@
-import { Worker, Queue } from 'bullmq';
+import {decryptSecret} from '../utils/secrets';
+import { Worker, DelayedError } from 'bullmq';
 import redis from '../config/redis';
 import prisma from '../config/prisma';
-import { reserveSendSlot, calculateDelayForNextSlot, checkHourlyCapacity } from '../services/rateLimitService';
-import { notifyRateLimitHit } from '../services/slackService';
-import { indexEmail } from '../services/slackService';
-// @ts-ignore - nodemailer types not installed
+import { admit } from '../services/rateLimitService';
+import { notifyRateLimitHit, indexEmail } from '../services/slackService';
+// @ts-ignore nodemailer types not bundled
 import nodemailer from 'nodemailer';
-import emailQueue from '../queues/emailQueue';
+const worker = new Worker('email-queue', async (job, token) => {
+ const email = await prisma.email.findUnique({where:{id:job.data.emailId},include:{sender:true}});
+ if (!email || ['SENT','FAILED','PROCESSING','CANCELLED','UNCERTAIN'].includes(email.status)) return;
+ if(email.scheduledAt.getTime()>Date.now()){await job.moveToDelayed(email.scheduledAt.getTime(),token);throw new DelayedError();}
+ const sender=email.sender;
+ const cap=Math.min(email.hourlyLimit,sender.hourlyLimit,Number(process.env.MAX_EMAILS_PER_HOUR_PER_SENDER || 100));
+ const gap=Math.max(email.delayMs,sender.minimumDelay,Number(process.env.MIN_EMAIL_DELAY_MS || 2000));
+ // Shared demo SMTP accounts must share the same distributed quota across tenants.
+ const slot=await admit((sender.etherealUser || sender.email).trim().toLowerCase(),cap,gap);
+ if (!slot.allowed) {
+   const at=Date.now()+Math.max(100,slot.wait);
+   const row=await prisma.email.updateMany({where:{id:email.id,status:{in:['SCHEDULED','DEFERRED']}},data:{status:'DEFERRED',scheduledAt:new Date(at),indexedAt:null}});
+   if(slot.count>=cap)await notifyRateLimitHit(email.userId,sender.id,slot.count).catch(console.error);
+   if(!row.count)return; await job.moveToDelayed(at,token);throw new DelayedError();
+ }
+ const claimed=await prisma.email.updateMany({where:{id:email.id,status:{in:['SCHEDULED','DEFERRED']}},data:{status:'PROCESSING',indexedAt:null}});
+ if (!claimed.count) return;
 
-const MAX_CONCURRENCY = parseInt(process.env.WORKER_CONCURRENCY || '5');
-const MIN_DELAY_MS = parseInt(process.env.MIN_EMAIL_DELAY_MS || '2000');
-
-const worker = new Worker('email-queue', async (job) => {
-  const { emailId, userId, senderId } = job.data;
-
-  const email = await prisma.email.findUnique({
-    where: { id: emailId },
-    include: { sender: true },
-  });
-
-  if (!email) {
-    console.error(`Email not found: ${emailId}`);
-    return;
-  }
-
-  if (email.status === 'SENT') {
-    console.log(`Email already sent: ${emailId}`);
-    return;
-  }
-
-  if (email.status === 'FAILED') {
-    console.log(`Email previously failed: ${emailId}`);
-    return;
-  }
-
-  const hasCapacity = await checkHourlyCapacity(senderId);
-
-  if (!hasCapacity) {
-    const delay = await calculateDelayForNextSlot(senderId);
-
-    await prisma.email.update({
-      where: { id: emailId },
-      data: { status: 'DEFERRED' },
-    });
-
-    await notifyRateLimitHit(userId, senderId, parseInt(process.env.MAX_EMAILS_PER_HOUR_PER_SENDER || '100'));
-
-    await emailQueue.add(
-      `send-email-${emailId}`,
-      { emailId, userId, senderId },
-      { delay },
-    );
-
-    await indexEmail({ id: emailId, userId, status: 'DEFERRED' });
-
-    return;
-  }
-
-  await prisma.email.update({
-    where: { id: emailId },
-    data: { status: 'PROCESSING' },
-  });
-
-  const sender = await prisma.sender.findUnique({
-    where: { id: senderId },
-  });
-
-  if (!sender) {
-    throw new Error(`Sender not found: ${senderId}`);
-  }
-
-  let etherealConfig = {
-    user: sender.etherealUser,
-    pass: sender.etherealPass,
-    host: sender.etherealHost,
-    port: sender.etherealPort,
-  };
-
-  // If no ethereal config, we'd need to generate one via nodemailer
-  // For now, use a placeholder - in production this would be auto-generated
-  if (!sender.etherealUser) {
-    console.error('No Ethereal config for sender, using placeholder');
-  }
-
-  const transporter = nodemailer.createTransport({
-    host: etherealConfig.host || 'localhost',
-    port: etherealConfig.port || 1025,
-    secure: etherealConfig.port === 465,
-    auth: {
-      user: etherealConfig.user || 'test',
-      pass: etherealConfig.pass || 'test',
-    },
-  });
-
-  let sendSuccess = false;
-  let etherealUrl: string | null = null;
-
-  try {
-    const info = await transporter.sendMail({
-      from: sender.email,
-      to: email.recipient,
-      subject: email.subject,
-      html: email.body,
-    });
-
-    sendSuccess = true;
-    etherealUrl = info.messageUrl || null;
-
-    await reserveSendSlot(senderId);
-  } catch (error) {
-    console.error(`Failed to send email ${emailId}:`, error);
-  }
-
-  await prisma.email.update({
-    where: { id: emailId },
-    data: {
-      status: sendSuccess ? 'SENT' : 'FAILED',
-      sentAt: sendSuccess ? new Date() : undefined,
-      etherealUrl,
-    },
-  });
-
-  await indexEmail({ ...email, status: sendSuccess ? 'SENT' : 'FAILED', sentAt: new Date(), etherealUrl });
-
-}, {
-  connection: redis,
-  concurrency: MAX_CONCURRENCY,
-  removeOnComplete: 100,
-  removeOnFail: 100,
-} as any);
-
-// QueueScheduler is optional in BullMQ v5 - only needed for queue maintenance
-// If not available, the queue will still work without it
-
-worker.on('completed', (job) => {
-  console.log(`Job completed: ${job.id}`);
-});
-
-worker.on('failed', (job, err) => {
-  console.error(`Job failed: ${job?.id}`, err);
-});
-
-worker.on('error', (err) => {
-  console.error('Worker error:', err);
-});
-
+ let info:any;
+ try {
+   if(!sender.etherealUser || !sender.etherealPass){await indexEmail(await prisma.email.update({where:{id:email.id},data:{status:'FAILED',indexedAt:null}}));return;}
+   const transport=nodemailer.createTransport({host:'smtp.ethereal.email',port:587,secure:false,requireTLS:true,auth:{user:sender.etherealUser,pass:decryptSecret(sender.etherealPass)},connectionTimeout:15000,socketTimeout:30000});
+   const sending=transport.sendMail({from:sender.email,to:email.recipient,subject:email.subject,html:email.body,messageId:`<${email.id}@reachinbox.local>`});
+   if(slot.count===cap)void notifyRateLimitHit(email.userId,sender.id,slot.count).catch(console.error);
+   info=await sending;
+ } catch(err) {
+   console.error('SMTP outcome failed or uncertain',email.id,err instanceof Error?err.name:'unknown');
+   await indexEmail(await prisma.email.update({where:{id:email.id},data:{status:'UNCERTAIN',indexedAt:null}})); return;
+ }
+ await indexEmail(await prisma.email.update({where:{id:email.id},data:{status:'SENT',indexedAt:null,sentAt:new Date(),etherealUrl:nodemailer.getTestMessageUrl(info)||null}}));
+}, {connection:redis,concurrency:Number(process.env.WORKER_CONCURRENCY||5),autorun:false});
+worker.on('error',console.error); worker.on('failed',(job,err)=>console.error(job?.id,err));
 export default worker;

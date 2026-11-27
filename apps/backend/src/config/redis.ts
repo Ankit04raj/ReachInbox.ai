@@ -1,12 +1,5 @@
+import 'dotenv/config';
 import Redis from 'ioredis';
-
-const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  retryStrategy: (times) => {
-    return Math.min(times * 50, 2000);
-  },
-});
-
-redis.on('connect', () => console.log('Redis connected'));
-redis.on('error', (err) => console.error('Redis error:', err));
-
+const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', { maxRetriesPerRequest: null });
+redis.on('error', err => console.error('Redis:', err.message));
 export default redis;

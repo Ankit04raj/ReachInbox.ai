@@ -3,8 +3,6 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import LoginPage from './pages/LoginPage';
 import Dashboard from './pages/Dashboard';
-import ScheduledPage from './pages/ScheduledPage';
-import SentPage from './pages/SentPage';
 import ComposeModal from './components/ComposeModal';
 import axios from 'axios';
 
@@ -20,12 +18,13 @@ const fetchCurrentUser = async (): Promise<User | null> => {
     const response = await axios.get('/api/auth/me', { withCredentials: true });
     return response.data.user;
   } catch (error) {
-    return null;
+    if (axios.isAxiosError(error) && error.response?.status === 401) return null;
+    throw error;
   }
 };
 
 const App: React.FC = () => {
-  const { data: user, isLoading } = useQuery({
+  const { data: user, isLoading, isError, refetch } = useQuery({
     queryKey: ['currentUser'],
     queryFn: fetchCurrentUser,
   });
@@ -36,6 +35,7 @@ const App: React.FC = () => {
     return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
   }
 
+  if (isError) return <div className="min-h-screen flex items-center justify-center"><div className="text-center"><h1>Unable to connect</h1><p>Check that the backend is running.</p><button onClick={()=>refetch()}>Retry</button></div></div>;
   const isAuthenticated = !!user;
 
   return (
@@ -51,11 +51,11 @@ const App: React.FC = () => {
         />
         <Route
           path="/scheduled"
-          element={isAuthenticated ? <ScheduledPage user={user!} /> : <Navigate to="/login" />}
+          element={isAuthenticated ? <Navigate to="/dashboard" /> : <Navigate to="/login" />}
         />
         <Route
           path="/sent"
-          element={isAuthenticated ? <SentPage user={user!} /> : <Navigate to="/login" />}
+          element={isAuthenticated ? <Navigate to="/dashboard" /> : <Navigate to="/login" />}
         />
         <Route path="/" element={<Navigate to={isAuthenticated ? '/dashboard' : '/login'} />} />
       </Routes>

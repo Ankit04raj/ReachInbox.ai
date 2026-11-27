@@ -31,6 +31,10 @@ model Email {
   sentAt        DateTime?
   status        EmailStatus @default(SCHEDULED)
   etherealUrl   String?
+  requestKey    String? @unique
+  indexedAt     DateTime?
+  delayMs       Int @default(2000)
+  hourlyLimit   Int @default(100)
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
 
@@ -40,12 +44,13 @@ model Email {
   @@index([userId, status])
   @@index([recipient])
   @@index([scheduledAt])
+  @@index([indexedAt, updatedAt])
 }
 
 model Sender {
   id               String   @id @default(cuid())
   userId           String
-  email            String   @unique
+  email            String
   hourlyLimit      Int      @default(100)
   minimumDelay     Int      @default(2000)
   etherealUser     String?
@@ -58,6 +63,7 @@ model Sender {
   user    User     @relation(fields: [userId], references: [id])
   emails  Email[]
 
+  @@unique([userId, email])
   @@index([userId])
 }
 
@@ -66,6 +72,7 @@ model SlackToken {
   userId      String   @unique
   accessToken String   @db.Text
   teamId      String
+  channelId   String @default("")
   connected   Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -79,4 +86,22 @@ enum EmailStatus {
   SENT
   FAILED
   DEFERRED
+  CANCELLED
+  UNCERTAIN
+}
+model ScheduleRequest {
+  id String @id
+  fingerprint String
+  createdAt DateTime @default(now())
+}
+
+model SlackNotice {
+  id String @id
+  userId String
+  senderId String
+  count Int
+  attempts Int @default(0)
+  nextAttempt DateTime @default(now())
+  deliveredAt DateTime?
+  @@index([deliveredAt, nextAttempt])
 }

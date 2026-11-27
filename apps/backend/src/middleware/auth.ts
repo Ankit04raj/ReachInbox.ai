@@ -14,7 +14,8 @@ export const authMiddleware = (
   }
 
   try {
-    const decoded = jwt.verify(token as string, process.env.JWT_SECRET || 'secret');
+    const decoded = jwt.verify(token as string, process.env.JWT_SECRET!, {algorithms:['HS256']});
+    if(typeof decoded==='string'||typeof decoded.userId!=='string'||typeof decoded.email!=='string')throw Error('Invalid claims');
     (req as any).user = decoded;
     next();
   } catch (error) {

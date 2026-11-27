@@ -11,8 +11,8 @@ const scheduleSchema = z.object({
   body: z.string().min(1, 'Body is required'),
   recipients: z.string().min(1, 'At least one recipient is required'),
   startTime: z.string().nullable(),
-  delayBetweenEmails: z.number().min(1000, 'Minimum 1 second delay'),
-  hourlyLimit: z.number().min(1, 'At least 1 email per hour'),
+  delayBetweenEmails: z.number().int().max(3600000).min(1000, 'Minimum 1 second delay'),
+  hourlyLimit: z.number().int().max(10000).min(1, 'At least 1 email per hour'),
 });
 
 type ScheduleFormData = z.infer<typeof scheduleSchema>;
@@ -24,6 +24,12 @@ interface ComposeModalProps {
 }
 
 const ComposeModal: React.FC<ComposeModalProps> = ({ open, onClose, user }) => {
+  const [senders,setSenders]=React.useState<{id:string;email:string}[]>([]);
+  const [senderId,setSenderId]=React.useState('');
+  const requestKey=React.useRef(crypto.randomUUID());
+  const lastPayload=React.useRef('');
+  const retryStart=React.useRef('');
+  React.useEffect(()=>{if(open){setSenderId('');setSenders([]);axios.get('/api/senders',{withCredentials:true}).then(r=>{setSenders(r.data);setSenderId(r.data[0]?.id||'');}).catch(()=>setSenders([]));}},[open]);
   const [emailCount, setEmailCount] = React.useState(0);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
@@ -45,27 +51,19 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ open, onClose, user }) => {
     },
   });
 
-  React.useState(() => {
-    if (!open) {
-      reset();
-    }
-  });
+  React.useEffect(() => { if (!open) { reset(); setEmailCount(0); } }, [open,reset]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if(file.size>2*1024*1024){alert('File exceeds 2 MB');return;}
 
     const reader = new FileReader();
     reader.onload = () => {
       const content = reader.result as string;
 
       // Parse emails from file
-      const emails = content
-        .split(/\n|,/)
-        .map(line => line.trim())
-        .filter(line => line && /\S+@\S+\.\S+/.test(line.replace(/\r/g, '')))
-        .filter((value, index, self) => self.indexOf(value) === index);
-
+      const emails=[...new Set((content.match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)||[]).map(e=>e.toLowerCase()))];
       setEmailCount(emails.length);
       setValue('recipients', emails.join('\n'));
     };
@@ -75,15 +73,15 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ open, onClose, user }) => {
   const onSubmit = async (data: ScheduleFormData) => {
     setIsSubmitting(true);
     try {
-      const recipients = data.recipients
-        .split(/\n|,/)
-        .map(r => r.trim())
-        .filter(r => r && /\S+@\S+\.\S+/.test(r));
+      const recipients=[...new Set(data.recipients.split(/\n|,/).map(r=>r.trim().toLowerCase()).filter(Boolean))];
+      if(recipients.length>10000)throw Error('Maximum 10,000 recipients per campaign');
+      if(!recipients.length||recipients.some(r=>!z.string().email().safeParse(r).success))throw Error('Enter valid email addresses');
 
       // Get or create a default sender
-      const senderRes = await axios.get('/api/senders/default', { withCredentials: true });
-      const senderId = senderRes.data?.id || 'default-sender';
-
+      if(!senderId) throw Error('No sender configured');
+      const fingerprint=JSON.stringify({...data,recipients,senderId});
+      if(lastPayload.current!==fingerprint){requestKey.current=crypto.randomUUID();retryStart.current=data.startTime?new Date(data.startTime).toISOString():new Date().toISOString();}
+      lastPayload.current=fingerprint;
       await axios.post(
         '/api/emails/schedule',
         {
@@ -91,19 +89,20 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ open, onClose, user }) => {
           body: data.body,
           recipients,
           senderId,
-          startTime: data.startTime || new Date().toISOString(),
+          startTime: retryStart.current,
           delayBetweenEmails: data.delayBetweenEmails,
           hourlyLimit: data.hourlyLimit,
         },
-        { withCredentials: true }
+        { withCredentials: true, headers:{'Idempotency-Key':requestKey.current} }
       );
 
       alert(`Successfully scheduled ${recipients.length} emails!`);
+      requestKey.current=crypto.randomUUID();lastPayload.current='';
       onClose();
       window.location.reload();
     } catch (error) {
       console.error('Schedule error:', error);
-      alert('Failed to schedule emails');
+      alert(axios.isAxiosError(error)?(error.response?.data?.error || 'Failed to schedule emails'):(error instanceof Error?error.message:'Failed to schedule emails'));
     } finally {
       setIsSubmitting(false);
     }
@@ -112,16 +111,17 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ open, onClose, user }) => {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4">
+    <div className="modal-overlay">
+      <div className="modal-card">
         <div className="flex justify-between items-center p-6 border-b">
           <h3 className="text-lg font-medium text-gray-900">Compose New Email</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+          <button type="button" disabled={isSubmitting} onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <X className="w-5 h-5" />
           </button>
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="p-6 space-y-4">
+          <label>Sender<select value={senderId} onChange={e=>setSenderId(e.target.value)} required><option value="">Select sender</option>{senders.map(s=><option key={s.id} value={s.id}>{s.email}</option>)}</select></label>{!senders.length&&<p>No Ethereal senders configured.</p>}
           <div>
             <label className="block text-sm font-medium text-gray-700">Subject</label>
             <input
@@ -217,7 +217,7 @@ const ComposeModal: React.FC<ComposeModalProps> = ({ open, onClose, user }) => {
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !senderId}
               className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700 disabled:opacity-50"
             >
               {isSubmitting ? 'Scheduling...' : 'Schedule Emails'}

@@ -17,7 +17,7 @@ export interface Email {
   body: string;
   scheduledAt: string;
   sentAt?: string | null;
-  status: 'SCHEDULED' | 'PROCESSING' | 'SENT' | 'FAILED' | 'DEFERRED';
+  status: 'SCHEDULED' | 'PROCESSING' | 'SENT' | 'FAILED' | 'DEFERRED' | 'UNCERTAIN' | 'CANCELLED';
   etherealUrl?: string | null;
   createdAt: string;
   updatedAt: string;

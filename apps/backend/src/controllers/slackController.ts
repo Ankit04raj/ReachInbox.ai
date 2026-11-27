@@ -1,94 +1,26 @@
+import {encryptSecret} from '../utils/secrets';
 import { Request, Response } from 'express';
-import passport from 'passport';
+import { randomBytes } from 'crypto';
 import prisma from '../config/prisma';
-import { WebClient } from '@slack/web-api';
-
-// Minimal Slack OAuth integration using passport-slash strategy
-// Using a simplified approach to avoid type conflicts
-
-interface SlackProfile {
-  id: string;
-  displayName: string;
-  emails: { value: string }[];
+import redis from '../config/redis';
+const front=()=>process.env.FRONTEND_URL||'http://localhost:3000';
+export async function connect(req:Request,res:Response) {
+ const state=randomBytes(32).toString('hex');
+ if(!process.env.SLACK_CLIENT_ID || !process.env.SLACK_CLIENT_SECRET) return res.status(503).json({error:'Slack not configured'});
+ await redis.set(`slack-state:${state}`,(req.user as any).userId,'EX',600);
+ const q=new URLSearchParams({client_id:process.env.SLACK_CLIENT_ID,scope:'incoming-webhook',redirect_uri:process.env.SLACK_REDIRECT_URI||'http://localhost:4000/api/slack/callback',state});
+ return res.redirect('https://slack.com/oauth/v2/authorize?'+q);
 }
-
-// Create Slack strategy dynamically to avoid import issues
-const SlackStrategy = require('passport-slack').Strategy;
-
-passport.use(new SlackStrategy(
-  {
-    clientID: process.env.SLACK_CLIENT_ID!,
-    clientSecret: process.env.SLACK_CLIENT_SECRET!,
-    callbackURL: process.env.SLACK_REDIRECT_URI || 'http://localhost:3000/api/slack/callback',
-  },
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async (accessToken: any, refreshToken: any, profile: any, done: any) => {
-    try {
-      const email = profile.emails?.[0]?.value || profile.email || profile.user?.email;
-      const userFromDB = await prisma.user.findFirst({
-        where: { email: email as string },
-      });
-
-      if (!userFromDB) {
-        return done(null, false);
-      }
-
-      await prisma.slackToken.upsert({
-        where: { userId: userFromDB.id },
-        update: {
-          accessToken,
-          teamId: (profile as any).team?.id || (profile as any).user?.team?.id || 'default',
-          connected: true,
-        },
-        create: {
-          userId: userFromDB.id,
-          accessToken,
-          teamId: (profile as any).team?.id || (profile as any).user?.team?.id || 'default',
-          connected: true,
-        },
-      });
-
-      return done(null, userFromDB.id);
-    } catch (error) {
-      return done(error, false);
-    }
-  },
-));
-
-export const connect = passport.authenticate('slack');
-
-export const callback: any = [
-  passport.authenticate('slack', { session: false }),
-  (req: Request, res: Response) => {
-    res.redirect(process.env.FRONTEND_URL || 'http://localhost:3000' + '/settings?slack=connected');
-  },
-];
-
-export const status = async (req: Request, res: Response): Promise<void> => {
-  const userId = ((req as any).user as any)?.userId;
-  if (!userId) {
-    res.status(401).json({ error: 'Unauthorized' });
-    return;
-  }
-
-  const token = await prisma.slackToken.findUnique({
-    where: { userId },
-  });
-
-  res.json({ connected: token?.connected || false });
-};
-
-export const disconnect = async (req: Request, res: Response): Promise<void> => {
-  const userId = ((req as any).user as any)?.userId;
-  if (!userId) {
-    res.status(401).json({ error: 'Unauthorized' });
-    return;
-  }
-
-  await prisma.slackToken.update({
-    where: { userId },
-    data: { connected: false },
-  });
-
-  res.json({ message: 'Slack disconnected' });
-};
+export async function callback(req:Request,res:Response) {
+ const state=String(req.query.state||'');
+ const owner=await redis.getdel(`slack-state:${state}`);
+ if(owner!==(req.user as any).userId || !owner || typeof req.query.code!=='string') return res.status(400).json({error:'Invalid Slack OAuth state'});
+ const r=await fetch('https://slack.com/api/oauth.v2.access',{method:'POST',signal:AbortSignal.timeout(10000),body:new URLSearchParams({client_id:process.env.SLACK_CLIENT_ID!,client_secret:process.env.SLACK_CLIENT_SECRET!,code:req.query.code,redirect_uri:process.env.SLACK_REDIRECT_URI||'http://localhost:4000/api/slack/callback'})});
+ const data=await r.json() as any;
+ if(!data.ok || !data.incoming_webhook?.url) return res.status(502).json({error:'Slack authorization failed'});
+ const values={accessToken:encryptSecret(data.incoming_webhook.url),teamId:data.team.id,channelId:data.incoming_webhook.channel_id,connected:true};
+ await prisma.slackToken.upsert({where:{userId:owner},create:{userId:owner,...values},update:values});
+ return res.redirect(front()+'/dashboard');
+}
+export async function status(req:Request,res:Response) { const t=await prisma.slackToken.findUnique({where:{userId:(req.user as any).userId}}); return res.json({connected:!!t?.connected}); }
+export async function disconnect(req:Request,res:Response) { const userId=(req.user as any).userId;await prisma.$transaction([prisma.slackToken.deleteMany({where:{userId}}),prisma.slackNotice.deleteMany({where:{userId,deliveredAt:null}})]); return res.json({connected:false}); }
